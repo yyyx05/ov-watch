@@ -131,10 +131,24 @@ class _FakeHistoryRepository implements HealthHistoryRepository {
   Future<void> dispose() async {}
 
   @override
-  Future<List<WatchSnapshot>> recent({int limit = 240}) async =>
-      samples.length <= limit
-      ? List<WatchSnapshot>.of(samples)
-      : samples.sublist(samples.length - limit);
+  Future<List<WatchSnapshot>> recent({
+    DateTime? since,
+    int limit = 50000,
+  }) async {
+    final filtered = since == null
+        ? samples
+        : samples
+              .where((sample) => !sample.capturedAt.isBefore(since))
+              .toList();
+    return filtered.length <= limit
+        ? List<WatchSnapshot>.of(filtered)
+        : filtered.sublist(filtered.length - limit);
+  }
+
+  @override
+  Future<void> pruneBefore(DateTime cutoff) async {
+    samples.removeWhere((sample) => sample.capturedAt.isBefore(cutoff));
+  }
 
   @override
   Future<void> save(WatchSnapshot snapshot) async {

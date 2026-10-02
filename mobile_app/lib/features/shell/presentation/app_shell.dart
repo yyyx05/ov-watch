@@ -1,7 +1,10 @@
+import 'dart:async';
+
 import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
 
 import '../../../core/theme/app_theme.dart';
+import '../../history/domain/heart_rate_series.dart';
 import '../../watch/application/watch_controller.dart';
 import '../../watch/domain/watch_snapshot.dart';
 import '../../watch/domain/watch_transport.dart';
@@ -35,6 +38,15 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     super.dispose();
   }
 
+  void _selectPage(int value) {
+    setState(() => _index = value);
+    if (value == 2 &&
+        widget.controller.devices.isEmpty &&
+        !widget.controller.busy) {
+      unawaited(widget.controller.refreshDevices());
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return ListenableBuilder(
@@ -52,7 +64,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
           ),
           bottomNavigationBar: NavigationBar(
             selectedIndex: _index,
-            onDestinationSelected: (value) => setState(() => _index = value),
+            onDestinationSelected: _selectPage,
             destinations: const [
               NavigationDestination(
                 icon: Icon(Icons.favorite_border_rounded),
@@ -398,12 +410,12 @@ class _HistoryPage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final end = DateTime.now();
+    final start = controller.historyRange.startAt(end);
     final samples = controller.history
         .where((item) => item.heartRate > 0)
         .toList();
-    final chartSamples = samples.length > 30
-        ? samples.sublist(samples.length - 30)
-        : samples;
+    final points = aggregateHeartRate(samples: samples, start: start, end: end);
     return ListView(
       padding: const EdgeInsets.fromLTRB(20, 24, 20, 32),
       children: [
@@ -415,6 +427,21 @@ class _HistoryPage extends StatelessWidget {
         const Text(
           '数据保存在本机，不需要云端账号',
           style: TextStyle(color: Color(0xFF7C879B)),
+        ),
+        const SizedBox(height: 16),
+        SizedBox(
+          width: double.infinity,
+          child: SegmentedButton<HistoryRange>(
+            segments: [
+              for (final range in HistoryRange.values)
+                ButtonSegment(value: range, label: Text(range.label)),
+            ],
+            selected: {controller.historyRange},
+            showSelectedIcon: false,
+            onSelectionChanged: (selection) {
+              controller.selectHistoryRange(selection.first);
+            },
+          ),
         ),
         const SizedBox(height: 20),
         Card(
@@ -429,13 +456,13 @@ class _HistoryPage extends StatelessWidget {
                 ),
                 const SizedBox(height: 4),
                 Text(
-                  '${samples.length} 条有效记录',
+                  '${samples.length} 条有效记录 · ${points.length} 个时间段',
                   style: const TextStyle(color: Color(0xFF8B95A7)),
                 ),
                 const SizedBox(height: 24),
                 SizedBox(
                   height: 220,
-                  child: chartSamples.length < 2
+                  child: points.length < 2
                       ? const _EmptyState(
                           icon: Icons.insights_rounded,
                           text: '连接手表并测量心率后显示曲线',
@@ -443,7 +470,9 @@ class _HistoryPage extends StatelessWidget {
                       : LineChart(
                           LineChartData(
                             minY: 40,
-                            maxY: 140,
+                            maxY: 180,
+                            minX: 0,
+                            maxX: 59,
                             gridData: const FlGridData(
                               show: true,
                               drawVerticalLine: false,
@@ -477,10 +506,10 @@ class _HistoryPage extends StatelessWidget {
                                   color: AppTheme.heart.withValues(alpha: 0.10),
                                 ),
                                 spots: [
-                                  for (var i = 0; i < chartSamples.length; i++)
+                                  for (final point in points)
                                     FlSpot(
-                                      i.toDouble(),
-                                      chartSamples[i].heartRate.toDouble(),
+                                      point.bucketIndex.toDouble(),
+                                      point.average,
                                     ),
                                 ],
                               ),
@@ -501,7 +530,10 @@ class _HistoryPage extends StatelessWidget {
                 const Icon(Icons.storage_rounded, color: AppTheme.brand),
                 const SizedBox(width: 14),
                 Expanded(
-                  child: Text('本地已保存 ${controller.history.length} 条采样记录'),
+                  child: Text(
+                    '${controller.historyRange.label}已加载 '
+                    '${controller.history.length} 条采样记录',
+                  ),
                 ),
                 IconButton(
                   onPressed: controller.refreshHistory,

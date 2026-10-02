@@ -4,7 +4,8 @@ import '../../watch/domain/watch_snapshot.dart';
 
 abstract interface class HealthHistoryRepository {
   Future<void> save(WatchSnapshot snapshot);
-  Future<List<WatchSnapshot>> recent({int limit = 240});
+  Future<List<WatchSnapshot>> recent({DateTime? since, int limit = 50000});
+  Future<void> pruneBefore(DateTime cutoff);
   Future<void> dispose();
 }
 
@@ -47,10 +48,15 @@ class SqliteHealthHistoryRepository implements HealthHistoryRepository {
   }
 
   @override
-  Future<List<WatchSnapshot>> recent({int limit = 240}) async {
+  Future<List<WatchSnapshot>> recent({
+    DateTime? since,
+    int limit = 50000,
+  }) async {
     final db = await _db;
     final rows = await db.query(
       'health_samples',
+      where: since == null ? null : 'captured_at >= ?',
+      whereArgs: since == null ? null : [since.millisecondsSinceEpoch],
       orderBy: 'captured_at DESC',
       limit: limit,
     );
@@ -59,6 +65,16 @@ class SqliteHealthHistoryRepository implements HealthHistoryRepository {
         .toList(growable: false)
         .reversed
         .toList();
+  }
+
+  @override
+  Future<void> pruneBefore(DateTime cutoff) async {
+    final db = await _db;
+    await db.delete(
+      'health_samples',
+      where: 'captured_at < ?',
+      whereArgs: [cutoff.millisecondsSinceEpoch],
+    );
   }
 
   @override

@@ -14,6 +14,22 @@ enum WatchConnectionStatus {
   failed,
 }
 
+enum HistoryRange {
+  day('今日', Duration(days: 1)),
+  week('7 天', Duration(days: 7)),
+  month('30 天', Duration(days: 30));
+
+  const HistoryRange(this.label, this.duration);
+
+  final String label;
+  final Duration duration;
+
+  DateTime startAt(DateTime now) => switch (this) {
+    HistoryRange.day => DateTime(now.year, now.month, now.day),
+    HistoryRange.week || HistoryRange.month => now.subtract(duration),
+  };
+}
+
 class WatchController extends ChangeNotifier {
   WatchController({
     required WatchTransport transport,
@@ -39,6 +55,7 @@ class WatchController extends ChangeNotifier {
   WatchConnectionStatus connectionStatus = WatchConnectionStatus.disconnected;
   List<WatchDevice> devices = const [];
   List<WatchSnapshot> history = const [];
+  HistoryRange historyRange = HistoryRange.day;
   List<String> logs = const [];
   WatchSnapshot? latest;
   WatchDevice? connectedDevice;
@@ -54,7 +71,14 @@ class WatchController extends ChangeNotifier {
     );
     _logSubscription = _transport.logs.listen(_onLog);
     _linkStateSubscription = _transport.linkStates.listen(_onLinkState);
-    await Future.wait([refreshDevices(), refreshHistory()]);
+    try {
+      await _historyRepository.pruneBefore(
+        DateTime.now().subtract(const Duration(days: 90)),
+      );
+    } catch (error) {
+      _setError(error);
+    }
+    await refreshHistory();
   }
 
   Future<void> refreshDevices() async {
@@ -128,8 +152,17 @@ class WatchController extends ChangeNotifier {
 
   Future<void> refreshHistory() async {
     await _guard(() async {
-      history = await _historyRepository.recent();
+      history = await _historyRepository.recent(
+        since: historyRange.startAt(DateTime.now()),
+      );
     }, showBusy: false);
+  }
+
+  Future<void> selectHistoryRange(HistoryRange value) async {
+    if (historyRange == value) return;
+    historyRange = value;
+    notifyListeners();
+    await refreshHistory();
   }
 
   Future<void> _onSnapshot(WatchSnapshot snapshot) async {
@@ -143,7 +176,9 @@ class WatchController extends ChangeNotifier {
           snapshot.capturedAt.difference(previous) >= historyPersistInterval) {
         await _historyRepository.save(snapshot);
         _lastPersistedAt = snapshot.capturedAt;
-        history = await _historyRepository.recent();
+        history = await _historyRepository.recent(
+          since: historyRange.startAt(DateTime.now()),
+        );
         notifyListeners();
       }
     } catch (error) {
