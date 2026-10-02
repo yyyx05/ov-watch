@@ -15,8 +15,25 @@ class AppShell extends StatefulWidget {
   State<AppShell> createState() => _AppShellState();
 }
 
-class _AppShellState extends State<AppShell> {
+class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   int _index = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    widget.controller.setAppActive(state == AppLifecycleState.resumed);
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -153,8 +170,22 @@ class _Header extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final connected =
-        controller.connectionStatus == WatchConnectionStatus.connected;
+    final status = controller.connectionStatus;
+    final connected = status == WatchConnectionStatus.connected;
+    final statusColor = switch (status) {
+      WatchConnectionStatus.connected => AppTheme.environment,
+      WatchConnectionStatus.connecting ||
+      WatchConnectionStatus.reconnecting => const Color(0xFFFF9B50),
+      WatchConnectionStatus.failed => AppTheme.heart,
+      WatchConnectionStatus.disconnected => const Color(0xFF9AA3B2),
+    };
+    final statusLabel = switch (status) {
+      WatchConnectionStatus.connected => '已连接',
+      WatchConnectionStatus.connecting => '连接中',
+      WatchConnectionStatus.reconnecting => '重连中',
+      WatchConnectionStatus.failed => '连接失败',
+      WatchConnectionStatus.disconnected => '未连接',
+    };
     return Row(
       children: [
         const Expanded(
@@ -185,15 +216,13 @@ class _Header extends StatelessWidget {
                 width: 8,
                 height: 8,
                 decoration: BoxDecoration(
-                  color: connected
-                      ? AppTheme.environment
-                      : const Color(0xFF9AA3B2),
+                  color: statusColor,
                   shape: BoxShape.circle,
                 ),
               ),
               const SizedBox(width: 7),
               Text(
-                connected ? '已连接' : '未连接',
+                statusLabel,
                 style: const TextStyle(fontWeight: FontWeight.w700),
               ),
             ],
@@ -518,7 +547,13 @@ class _DevicePage extends StatelessWidget {
         ),
         const SizedBox(height: 20),
         if (controller.errorMessage != null)
-          _ErrorBanner(message: controller.errorMessage!),
+          _ErrorBanner(
+            message: controller.errorMessage!,
+            actionLabel: controller.errorCanOpenSettings ? '打开设置' : null,
+            onAction: controller.errorCanOpenSettings
+                ? controller.openAppSettings
+                : null,
+          ),
         if (controller.busy)
           const LinearProgressIndicator(
             borderRadius: BorderRadius.all(Radius.circular(999)),
@@ -555,6 +590,12 @@ class _DeviceCard extends StatelessWidget {
     final connected =
         selected &&
         controller.connectionStatus == WatchConnectionStatus.connected;
+    final transitioning =
+        selected &&
+        (controller.connectionStatus == WatchConnectionStatus.connecting ||
+            controller.connectionStatus == WatchConnectionStatus.reconnecting);
+    final failed =
+        selected && controller.connectionStatus == WatchConnectionStatus.failed;
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(18),
@@ -592,14 +633,16 @@ class _DeviceCard extends StatelessWidget {
             FilledButton.tonal(
               onPressed: controller.busy
                   ? null
-                  : connected
+                  : connected || transitioning
                   ? controller.disconnect
                   : () => controller.connect(device),
               child: Text(
                 connected
                     ? '断开'
-                    : selected
-                    ? '连接中'
+                    : transitioning
+                    ? '停止'
+                    : failed
+                    ? '重试'
                     : '连接',
               ),
             ),
@@ -645,6 +688,13 @@ class _SettingsPage extends StatelessWidget {
                 subtitle: const Text('发送到手表 RTC'),
                 trailing: const Icon(Icons.chevron_right_rounded),
                 onTap: controller.syncClock,
+              ),
+              const Divider(height: 1, indent: 16, endIndent: 16),
+              const ListTile(
+                leading: Icon(Icons.bluetooth_connected_rounded),
+                title: Text('自动重连'),
+                subtitle: Text('连接中断后指数退避重试，最多 5 次'),
+                trailing: Chip(label: Text('已开启')),
               ),
             ],
           ),
@@ -729,9 +779,11 @@ class _EmptyState extends StatelessWidget {
 }
 
 class _ErrorBanner extends StatelessWidget {
-  const _ErrorBanner({required this.message});
+  const _ErrorBanner({required this.message, this.actionLabel, this.onAction});
 
   final String message;
+  final String? actionLabel;
+  final VoidCallback? onAction;
 
   @override
   Widget build(BuildContext context) {
@@ -752,6 +804,10 @@ class _ErrorBanner extends StatelessWidget {
               style: const TextStyle(color: Color(0xFF9F2438)),
             ),
           ),
+          if (actionLabel != null && onAction != null) ...[
+            const SizedBox(width: 8),
+            TextButton(onPressed: onAction, child: Text(actionLabel!)),
+          ],
         ],
       ),
     );

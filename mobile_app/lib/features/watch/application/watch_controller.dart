@@ -6,22 +6,35 @@ import '../../history/data/health_history_repository.dart';
 import '../domain/watch_snapshot.dart';
 import '../domain/watch_transport.dart';
 
-enum WatchConnectionStatus { disconnected, connecting, connected }
+enum WatchConnectionStatus {
+  disconnected,
+  connecting,
+  connected,
+  reconnecting,
+  failed,
+}
 
 class WatchController extends ChangeNotifier {
   WatchController({
     required WatchTransport transport,
     required HealthHistoryRepository historyRepository,
+    this.pollInterval = const Duration(seconds: 2),
+    this.historyPersistInterval = const Duration(minutes: 1),
   }) : _transport = transport,
        _historyRepository = historyRepository;
 
   final WatchTransport _transport;
   final HealthHistoryRepository _historyRepository;
+  final Duration pollInterval;
+  final Duration historyPersistInterval;
 
   StreamSubscription<WatchSnapshot>? _snapshotSubscription;
   StreamSubscription<String>? _logSubscription;
+  StreamSubscription<WatchLinkState>? _linkStateSubscription;
   Timer? _pollTimer;
   DateTime? _lastPersistedAt;
+  bool _pollInFlight = false;
+  bool _appActive = true;
 
   WatchConnectionStatus connectionStatus = WatchConnectionStatus.disconnected;
   List<WatchDevice> devices = const [];
@@ -30,6 +43,7 @@ class WatchController extends ChangeNotifier {
   WatchSnapshot? latest;
   WatchDevice? connectedDevice;
   String? errorMessage;
+  bool errorCanOpenSettings = false;
   bool autoRefresh = true;
   bool busy = false;
 
@@ -39,6 +53,7 @@ class WatchController extends ChangeNotifier {
       onError: (Object error, StackTrace stackTrace) => _setError(error),
     );
     _logSubscription = _transport.logs.listen(_onLog);
+    _linkStateSubscription = _transport.linkStates.listen(_onLinkState);
     await Future.wait([refreshDevices(), refreshHistory()]);
   }
 
@@ -55,9 +70,6 @@ class WatchController extends ChangeNotifier {
     notifyListeners();
     try {
       await _transport.connect(device.address);
-      connectionStatus = WatchConnectionStatus.connected;
-      _startPolling();
-      await _transport.requestSnapshot();
     } catch (error) {
       connectionStatus = WatchConnectionStatus.disconnected;
       connectedDevice = null;
@@ -76,6 +88,10 @@ class WatchController extends ChangeNotifier {
   }
 
   Future<void> requestNow() async {
+    if (connectionStatus != WatchConnectionStatus.connected) {
+      _setError(const WatchTransportException('手表尚未连接'));
+      return;
+    }
     await _guard(_transport.requestSnapshot);
   }
 
@@ -93,6 +109,23 @@ class WatchController extends ChangeNotifier {
     notifyListeners();
   }
 
+  void setAppActive(bool value) {
+    if (_appActive == value) return;
+    _appActive = value;
+    if (value) {
+      _startPolling();
+      if (connectionStatus == WatchConnectionStatus.connected) {
+        unawaited(_requestSnapshotQuietly());
+      }
+    } else {
+      _pollTimer?.cancel();
+    }
+  }
+
+  Future<void> openAppSettings() async {
+    await _transport.openAppSettings();
+  }
+
   Future<void> refreshHistory() async {
     await _guard(() async {
       history = await _historyRepository.recent();
@@ -104,13 +137,17 @@ class WatchController extends ChangeNotifier {
     errorMessage = null;
     notifyListeners();
 
-    final previous = _lastPersistedAt;
-    if (previous == null ||
-        snapshot.capturedAt.difference(previous).inSeconds >= 60) {
-      _lastPersistedAt = snapshot.capturedAt;
-      await _historyRepository.save(snapshot);
-      history = await _historyRepository.recent();
-      notifyListeners();
+    try {
+      final previous = _lastPersistedAt;
+      if (previous == null ||
+          snapshot.capturedAt.difference(previous) >= historyPersistInterval) {
+        await _historyRepository.save(snapshot);
+        _lastPersistedAt = snapshot.capturedAt;
+        history = await _historyRepository.recent();
+        notifyListeners();
+      }
+    } catch (error) {
+      _setError(error);
     }
   }
 
@@ -118,25 +155,59 @@ class WatchController extends ChangeNotifier {
     final timestamp = DateTime.now().toIso8601String().substring(11, 19);
     logs = [...logs, '$timestamp  $line'];
     if (logs.length > 120) logs = logs.sublist(logs.length - 120);
-    if (line == 'DISCONNECTED') {
-      _pollTimer?.cancel();
-      connectionStatus = WatchConnectionStatus.disconnected;
+    notifyListeners();
+  }
+
+  void _onLinkState(WatchLinkState state) {
+    switch (state) {
+      case WatchLinkState.disconnected:
+        _pollTimer?.cancel();
+        connectionStatus = WatchConnectionStatus.disconnected;
+      case WatchLinkState.connecting:
+        _pollTimer?.cancel();
+        connectionStatus = WatchConnectionStatus.connecting;
+      case WatchLinkState.connected:
+        connectionStatus = WatchConnectionStatus.connected;
+        errorMessage = null;
+        errorCanOpenSettings = false;
+        _startPolling();
+        unawaited(_requestSnapshotQuietly());
+      case WatchLinkState.reconnecting:
+        _pollTimer?.cancel();
+        connectionStatus = WatchConnectionStatus.reconnecting;
+      case WatchLinkState.failed:
+        _pollTimer?.cancel();
+        connectionStatus = WatchConnectionStatus.failed;
+        _setError(const WatchTransportException('自动重连失败，请确认手表蓝牙已开启后重试'));
+        return;
     }
     notifyListeners();
   }
 
   void _startPolling() {
     _pollTimer?.cancel();
-    if (!autoRefresh || connectionStatus != WatchConnectionStatus.connected) {
+    if (!autoRefresh ||
+        !_appActive ||
+        connectionStatus != WatchConnectionStatus.connected) {
       return;
     }
-    _pollTimer = Timer.periodic(const Duration(seconds: 2), (_) async {
-      try {
-        await _transport.requestSnapshot();
-      } catch (error) {
-        _setError(error);
-      }
-    });
+    _pollTimer = Timer.periodic(pollInterval, (_) => _requestSnapshotQuietly());
+  }
+
+  Future<void> _requestSnapshotQuietly() async {
+    if (_pollInFlight ||
+        !_appActive ||
+        connectionStatus != WatchConnectionStatus.connected) {
+      return;
+    }
+    _pollInFlight = true;
+    try {
+      await _transport.requestSnapshot();
+    } catch (error) {
+      _setError(error);
+    } finally {
+      _pollInFlight = false;
+    }
   }
 
   Future<void> _guard(
@@ -145,6 +216,7 @@ class WatchController extends ChangeNotifier {
   }) async {
     if (showBusy) busy = true;
     errorMessage = null;
+    errorCanOpenSettings = false;
     notifyListeners();
     try {
       await action();
@@ -158,6 +230,8 @@ class WatchController extends ChangeNotifier {
 
   void _setError(Object error) {
     errorMessage = error.toString();
+    errorCanOpenSettings =
+        error is WatchTransportException && error.canOpenSettings;
     notifyListeners();
   }
 
@@ -166,6 +240,7 @@ class WatchController extends ChangeNotifier {
     _pollTimer?.cancel();
     _snapshotSubscription?.cancel();
     _logSubscription?.cancel();
+    _linkStateSubscription?.cancel();
     unawaited(_transport.dispose());
     unawaited(_historyRepository.dispose());
     super.dispose();
