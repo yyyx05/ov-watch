@@ -1,0 +1,22 @@
+name: ov_watch_app
+description: Android companion app for OV-Watch.
+publish_to: none
+version: 0.1.0+1
+
+environment:
+  sdk: ">=3.9.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  fl_chart: ^1.2.0
+  flutter_classic_bluetooth: ^1.6.0
+  sqflite: ^2.4.4
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
