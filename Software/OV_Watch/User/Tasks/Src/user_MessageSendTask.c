@@ -118,6 +118,31 @@ void MessageSendTask(void *argument)
 				printf("SPO2:%d%%\r\n",BLEMessage.SPO2);
 				printf("Step today:%d\r\n",BLEMessage.stepNum);
 			}
+			else if(!strcmp((char *)HardInt_receive_str,"OV+DATA"))
+			{
+				HAL_RTC_GetTime(&hrtc,&(BLEMessage.nowtime),RTC_FORMAT_BIN);
+				HAL_RTC_GetDate(&hrtc,&BLEMessage.nowdate,RTC_FORMAT_BIN);
+				BLEMessage.humi = HWInterface.AHT21.humidity;
+				BLEMessage.temp = HWInterface.AHT21.temperature;
+				BLEMessage.HR = HWInterface.HR_meter.HrRate;
+				BLEMessage.stepNum = HWInterface.IMU.Steps;
+
+				/*
+				 * OVD v1 is a single CRLF-terminated telemetry frame. Keep SpO2
+				 * unavailable until the firmware has a real measurement path.
+				 */
+				printf("OVD|1|ts=20%02d%02d%02dT%02d%02d%02d|temp=%d|humi=%d|hr=%d|spo2=na|steps=%d\r\n",
+					BLEMessage.nowdate.Year,
+					BLEMessage.nowdate.Month,
+					BLEMessage.nowdate.Date,
+					BLEMessage.nowtime.Hours,
+					BLEMessage.nowtime.Minutes,
+					BLEMessage.nowtime.Seconds,
+					BLEMessage.temp,
+					BLEMessage.humi,
+					BLEMessage.HR,
+					BLEMessage.stepNum);
+			}
 			//set time//OV+ST=20230629125555
 			else if(strlen(HardInt_receive_str)==20)
 			{

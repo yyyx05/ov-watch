@@ -42,4 +42,40 @@ void main() {
     expect(parser.addLine('OK'), isNull);
     expect(parser.addLine('Heart Rate:82%'), isNull);
   });
+
+  test('parses an OVD v1 single-line frame', () {
+    final parser = LegacyOvParser();
+    final receivedAt = DateTime(2026, 10, 2, 13);
+
+    final snapshot = parser.addLine(
+      'OVD|1|ts=20261002T125806|temp=-3|humi=61|hr=78|spo2=na|steps=3241',
+      receivedAt: receivedAt,
+    );
+
+    expect(snapshot, isNotNull);
+    expect(snapshot!.capturedAt, receivedAt);
+    expect(snapshot.watchTime, DateTime(2026, 10, 2, 12, 58, 6));
+    expect(snapshot.temperature, -3);
+    expect(snapshot.humidity, 61);
+    expect(snapshot.heartRate, 78);
+    expect(snapshot.spo2, isNull);
+    expect(snapshot.steps, 3241);
+  });
+
+  test('rejects unknown, incomplete, and malformed OVD frames', () {
+    final parser = LegacyOvParser();
+
+    expect(
+      parser.addLine('OVD|2|ts=20261002T125806|temp=26|humi=61|hr=78|steps=1'),
+      isNull,
+    );
+    expect(
+      parser.addLine('OVD|1|ts=20261002T125806|temp=26|humi=61|hr=78'),
+      isNull,
+    );
+    expect(
+      parser.addLine('OVD|1|ts=20260231T125806|temp=26|humi=61|hr=78|steps=1'),
+      isNull,
+    );
+  });
 }

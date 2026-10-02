@@ -20,6 +20,10 @@ class LegacyOvParser {
     final line = rawLine.trim();
     if (line.isEmpty) return null;
 
+    if (line.startsWith('OVD|')) {
+      return _parseVersionedFrame(line, receivedAt: receivedAt);
+    }
+
     if (line == 'RecStr:OV+SEND' || line.startsWith('data:')) {
       _reset();
     }
@@ -70,6 +74,85 @@ class LegacyOvParser {
     );
     _reset();
     return snapshot;
+  }
+
+  WatchSnapshot? _parseVersionedFrame(String line, {DateTime? receivedAt}) {
+    final parts = line.split('|');
+    if (parts.length < 3 || parts[0] != 'OVD' || parts[1] != '1') {
+      return null;
+    }
+
+    final fields = <String, String>{};
+    for (final part in parts.skip(2)) {
+      final separator = part.indexOf('=');
+      if (separator <= 0 || separator == part.length - 1) return null;
+      final key = part.substring(0, separator);
+      if (fields.containsKey(key)) return null;
+      fields[key] = part.substring(separator + 1);
+    }
+
+    final timestamp = fields['ts'];
+    final temperature = int.tryParse(fields['temp'] ?? '');
+    final humidity = int.tryParse(fields['humi'] ?? '');
+    final heartRate = int.tryParse(fields['hr'] ?? '');
+    final steps = int.tryParse(fields['steps'] ?? '');
+    final watchTime = timestamp == null ? null : _parseTimestamp(timestamp);
+    if (watchTime == null ||
+        temperature == null ||
+        humidity == null ||
+        heartRate == null ||
+        steps == null) {
+      return null;
+    }
+
+    final spo2Text = fields['spo2'];
+    final spo2 = spo2Text == null || spo2Text == 'na'
+        ? null
+        : int.tryParse(spo2Text);
+    if (spo2Text != null && spo2Text != 'na' && spo2 == null) return null;
+
+    _reset();
+    return WatchSnapshot(
+      capturedAt: receivedAt ?? DateTime.now(),
+      watchTime: watchTime,
+      steps: steps,
+      heartRate: heartRate,
+      temperature: temperature,
+      humidity: humidity,
+      spo2: spo2,
+    );
+  }
+
+  DateTime? _parseTimestamp(String value) {
+    final match = RegExp(
+      r'^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})$',
+    ).firstMatch(value);
+    if (match == null) return null;
+
+    final values = [
+      for (var index = 1; index <= 6; index++) int.parse(match.group(index)!),
+    ];
+    try {
+      final parsed = DateTime(
+        values[0],
+        values[1],
+        values[2],
+        values[3],
+        values[4],
+        values[5],
+      );
+      if (parsed.year != values[0] ||
+          parsed.month != values[1] ||
+          parsed.day != values[2] ||
+          parsed.hour != values[3] ||
+          parsed.minute != values[4] ||
+          parsed.second != values[5]) {
+        return null;
+      }
+      return parsed;
+    } on ArgumentError {
+      return null;
+    }
   }
 
   int? _readInt(String line, String prefix, {String suffix = ''}) {

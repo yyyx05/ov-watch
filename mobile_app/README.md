@@ -1,12 +1,12 @@
 # OV-Watch Android App
 
-OV-Watch 的 Android 伴侣应用。当前阶段直接兼容手表已有的经典蓝牙
-SPP 文本协议，不要求先修改 STM32 固件。
+OV-Watch 的 Android 伴侣应用。应用兼容手表原有的经典蓝牙 SPP 文本协议，
+并优先使用固件新增的 `OV+DATA` 单行遥测帧；旧固件会自动回退到 `OV+SEND`。
 
 ## 当前能力
 
 - 获取已配对的经典蓝牙设备并连接 KT6368
-- 发送 `OV`、`OV+SEND` 和 `OV+ST=yyyyMMddHHmmss`
+- 发送 `OV`、`OV+DATA`/`OV+SEND` 和 `OV+ST=yyyyMMddHHmmss`
 - 解析步数、心率、环境温湿度和手表时间
 - 自动轮询并用 SQLite 保存历史记录
 - 健康总览、今日/7 天/30 天历史趋势、设备管理和调试日志界面
@@ -52,8 +52,10 @@ SPP UUID，蓝牙权限由 `flutter_classic_bluetooth` 插件清单合并提供�
 1. 现有协议连接、健康总览和本地历史（当前阶段）
 2. 真机联调和后台长期运行验证（重连与前后台轮询已实现）
 3. 手表设置、通知转发、天气和音乐控制
-4. 协议 v1：稳定帧边界、请求序号、错误码和主动推送
+4. 在单行遥测 v1 的基础上增加请求序号、错误码和主动推送
 5. OTA 升级：版本校验、用户确认、进度与失败恢复
 
 OTA 放在最后，是因为升级中断可能让 APP 区不可启动，需要先把普通通信
 和设备识别验证稳定。
+
+当前遥测帧格式见 [`../docs/bluetooth-protocol.md`](../docs/bluetooth-protocol.md)。

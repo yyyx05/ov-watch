@@ -19,6 +19,8 @@ class SppWatchTransport implements WatchTransport {
   BtcReconnectingConnection? _connection;
   StreamSubscription<String>? _lineSubscription;
   StreamSubscription<BtcReconnectState>? _stateSubscription;
+  Timer? _protocolProbeTimer;
+  bool? _supportsVersionedData;
 
   @override
   Stream<WatchSnapshot> get snapshots => _snapshotController.stream;
@@ -48,6 +50,7 @@ class SppWatchTransport implements WatchTransport {
   Future<void> connect(String address) async {
     await disconnect();
     await _ensureReady();
+    _supportsVersionedData = null;
     _log('CONNECT $address');
     _linkStateController.add(WatchLinkState.connecting);
     final connection = _bluetooth.connectWithReconnect(
@@ -64,7 +67,13 @@ class SppWatchTransport implements WatchTransport {
     _lineSubscription = connection.input.lines().listen(
       (line) {
         _log('RX $line');
+        final isVersionedFrame = line.trimLeft().startsWith('OVD|');
         final snapshot = _parser.addLine(line);
+        if (isVersionedFrame && snapshot != null) {
+          _supportsVersionedData = true;
+          _protocolProbeTimer?.cancel();
+          _protocolProbeTimer = null;
+        }
         if (snapshot != null) _snapshotController.add(snapshot);
       },
       onError: (Object error, StackTrace stackTrace) {
@@ -84,7 +93,29 @@ class SppWatchTransport implements WatchTransport {
   }
 
   @override
-  Future<void> requestSnapshot() => _writeLine('OV+SEND');
+  Future<void> requestSnapshot() async {
+    if (_supportsVersionedData == true) {
+      await _writeLine('OV+DATA');
+      return;
+    }
+    if (_supportsVersionedData == false) {
+      await _writeLine('OV+SEND');
+      return;
+    }
+
+    await _writeLine('OV+DATA');
+    _protocolProbeTimer?.cancel();
+    _protocolProbeTimer = Timer(const Duration(milliseconds: 800), () {
+      if (_supportsVersionedData != null || !isConnected) return;
+      _supportsVersionedData = false;
+      _log('INFO OV+DATA unsupported; falling back to OV+SEND');
+      unawaited(
+        _writeLine(
+          'OV+SEND',
+        ).catchError((Object error) => _log('ERROR $error')),
+      );
+    });
+  }
 
   @override
   Future<void> syncClock(DateTime time) {
@@ -111,6 +142,9 @@ class SppWatchTransport implements WatchTransport {
 
   @override
   Future<void> disconnect() async {
+    _protocolProbeTimer?.cancel();
+    _protocolProbeTimer = null;
+    _supportsVersionedData = null;
     await _lineSubscription?.cancel();
     _lineSubscription = null;
     await _stateSubscription?.cancel();
