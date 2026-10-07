@@ -1,7 +1,7 @@
 name: ov_watch_app
 description: Android companion app for OV-Watch.
 publish_to: none
-version: 0.1.2+3
+version: 0.2.0+4
 
 environment:
   sdk: ">=3.9.0 <4.0.0"

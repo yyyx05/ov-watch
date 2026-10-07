@@ -205,10 +205,12 @@ void TaskTickHook(void)
 	//to increase the LVGL tick
 	lv_tick_inc(1);
 	//to increase the timerpage's timer(put in here is to ensure the Real Time)
+	Stopwatch_Tick1ms();
+	ui_TimerPage_elapsed_ms = Stopwatch_ElapsedMs();
+	ui_TimerPageFlag = Stopwatch_IsRunning();
 	if(ui_TimerPageFlag)
 	{
     IdleTimerCount = 0;
-    ui_TimerPage_elapsed_ms += 1;
 	}
   else
   {

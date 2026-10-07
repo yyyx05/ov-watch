@@ -9,6 +9,7 @@
 
 // user
 #include "user_TasksInit.h"
+#include "user_MessageSendTask.h"
 #include "HWDataAccess.h"
 #include "version.h"
 
@@ -145,6 +146,7 @@ void HardwareInitTask(void *argument)
       }
     }
 
+    Stopwatch_Init();
 
     // BLE
     HWInterface.BLE.Init();

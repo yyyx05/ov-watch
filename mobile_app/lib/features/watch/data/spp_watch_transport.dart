@@ -2,11 +2,12 @@ import 'dart:async';
 
 import 'package:flutter_classic_bluetooth/flutter_classic_bluetooth.dart';
 
+import '../../stopwatch/domain/watch_companion.dart';
 import '../domain/watch_snapshot.dart';
 import '../domain/watch_transport.dart';
 import 'legacy_ov_parser.dart';
 
-class SppWatchTransport implements WatchTransport {
+class SppWatchTransport implements WatchTransport, WatchCompanionTransport {
   SppWatchTransport({
     this.responseTimeout = const Duration(seconds: 2),
     this.protocolProbeTimeout = const Duration(milliseconds: 800),
@@ -86,10 +87,16 @@ class SppWatchTransport implements WatchTransport {
         }
         if (snapshot != null) _snapshotController.add(snapshot);
         final response = _activeResponse;
-        if (response != null &&
-            !response.isCompleted &&
-            (_responseMatches?.call(line, snapshot) ?? false)) {
-          response.complete();
+        if (response != null && !response.isCompleted) {
+          try {
+            if (_responseMatches?.call(line, snapshot) ?? false) {
+              response.complete();
+            }
+          } on FormatException catch (error) {
+            response.completeError(
+              WatchTransportException('手表回传数据无效：${error.message}'),
+            );
+          }
         }
       },
       onError: (Object error, StackTrace stackTrace) {
@@ -153,12 +160,24 @@ class SppWatchTransport implements WatchTransport {
         '${_two(time.day)}${_two(time.hour)}${_two(time.minute)}'
         '${_two(time.second)}';
     return _enqueue((session) async {
+      String? rejection;
       try {
-        await _sendAndWait(
-          session,
-          command,
-          (line, snapshot) => line.trim() == 'TIMESETOK',
-        );
+        await _sendAndWait(session, command, (line, snapshot) {
+          if (line.trim() == 'TIMESETOK') return true;
+          final match = RegExp(
+            r'^OVERR\|1\|cmd=ST\|code=([A-Z_]+)$',
+          ).firstMatch(line.trim());
+          if (match == null) return false;
+          rejection = switch (match[1]) {
+            'SYNC_DISABLED' => '手表未开启“同步APP”，请在手表“设置 → 日期时间”中开启后重试',
+            'INVALID_LENGTH' => '手表拒绝校时：命令长度不正确，请更新 App 和手表固件',
+            'INVALID_TIME' => '手表拒绝校时：日期时间无效，请检查手机时间',
+            'RTC_ERROR' => '手表时钟写入失败，请重试；若持续失败请检查手表固件',
+            _ => '手表拒绝校时：${match[1]}',
+          };
+          return true;
+        });
+        if (rejection != null) throw WatchTransportException(rejection!);
       } on TimeoutException {
         _ensureSession(session);
         throw const WatchTransportException(
@@ -166,6 +185,51 @@ class SppWatchTransport implements WatchTransport {
         );
       }
     });
+  }
+
+  @override
+  Future<WatchCapabilities?> requestCapabilities() async {
+    WatchCapabilities? result;
+    try {
+      await _enqueue(
+        (session) => _sendAndWait(session, 'OV+CAP', (line, snapshot) {
+          if (!line.trim().startsWith('OVCAP|')) return false;
+          result = WatchCapabilities.parse(line);
+          return true;
+        }, timeout: protocolProbeTimeout),
+      );
+    } on TimeoutException {
+      return null;
+    }
+    return result;
+  }
+
+  @override
+  Future<WatchStopwatchSnapshot> requestStopwatch() async {
+    late WatchStopwatchSnapshot result;
+    await _enqueue(
+      (session) => _sendAndWait(session, 'OV+SW', (line, snapshot) {
+        if (!line.trim().startsWith('OVSW|')) return false;
+        result = WatchStopwatchSnapshot.parse(line);
+        return true;
+      }),
+    );
+    return result;
+  }
+
+  @override
+  Future<WatchStopwatchLog> requestStopwatchLog({int afterSid = 0}) async {
+    RangeError.checkValueInInterval(afterSid, 0, 0xffffffff, 'afterSid');
+    late WatchStopwatchLog result;
+    await _enqueue(
+      (session) =>
+          _sendAndWait(session, 'OV+SWLOG=$afterSid', (line, snapshot) {
+            if (!line.trim().startsWith('OVSL|')) return false;
+            result = WatchStopwatchLog.parse(line);
+            return true;
+          }),
+    );
+    return result;
   }
 
   Future<void> _enqueue(Future<void> Function(int session) action) {

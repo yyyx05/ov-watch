@@ -208,6 +208,89 @@ void main() {
     },
   );
 
+  test('companion commands share the sample and clock transaction queue', () async {
+    await connect();
+    final sample = transport.requestSnapshot();
+    final capabilities = transport.requestCapabilities();
+    final stopwatch = transport.requestStopwatch();
+    final history = transport.requestStopwatchLog(afterSid: 4294967294);
+    await _until(() => bluetooth.writes.length == 2);
+    expect(bluetooth.writes.last, 'OV+DATA');
+    bluetooth.receive(_versionedFrame);
+    await sample;
+    await _until(() => bluetooth.writes.length == 3);
+    expect(bluetooth.writes.last, 'OV+CAP');
+    bluetooth.receive(
+      'OVCAP|1|data=1|clock=1|clock_sync=0|sw=1|swlog=1|swlog_cap=8|persist=0\r\n',
+    );
+    expect((await capabilities)!.stopwatch, isTrue);
+    await _until(() => bluetooth.writes.length == 4);
+    expect(bluetooth.writes.last, 'OV+SW');
+    bluetooth.receive(
+      'OVSW|1|boot=9|sid=4294967295|state=pause|elapsed_ms=3210\r\n',
+    );
+    expect((await stopwatch).elapsedMs, 3210);
+    await _until(() => bluetooth.writes.length == 5);
+    expect(bluetooth.writes.last, 'OV+SWLOG=4294967294');
+    bluetooth.receive(
+      'OVSL|1|boot=9|sid=4294967295|end=20261007T163045|dur_ms=3210|more=0\r\n',
+    );
+    expect((await history).sid, 4294967295);
+    expect(
+      bluetooth.writes.every((command) => !command.contains('\n')),
+      isTrue,
+    );
+  });
+
+  test(
+    'legacy capability timeout returns unsupported and malformed data fails safely',
+    () async {
+      await connect();
+      expect(await transport.requestCapabilities(), isNull);
+      final pending = transport.requestStopwatch();
+      final failed = expectLater(
+        pending,
+        throwsA(isA<WatchTransportException>()),
+      );
+      await _until(() => bluetooth.writes.last == 'OV+SW');
+      bluetooth.receive('OVSW|1|boot=9|sid=1|state=run|elapsed_ms=-1\r\n');
+      await failed;
+      final next = transport.requestStopwatch();
+      await _until(() => bluetooth.writes.length == 4);
+      bluetooth.receive('OVSW|1|boot=9|sid=0|state=idle|elapsed_ms=0\r\n');
+      expect((await next).elapsedMs, 0);
+    },
+  );
+
+  test(
+    'clock firmware errors give actionable Chinese failure, not success',
+    () async {
+      await connect();
+      for (final entry in {
+        'SYNC_DISABLED': '同步APP',
+        'INVALID_LENGTH': '长度',
+        'INVALID_TIME': '日期时间无效',
+        'RTC_ERROR': '写入失败',
+      }.entries) {
+        final count = bluetooth.writes.length;
+        final pending = transport.syncClock(DateTime(2026, 10, 7));
+        final failed = expectLater(
+          pending,
+          throwsA(
+            isA<WatchTransportException>().having(
+              (error) => error.message,
+              'message',
+              contains(entry.value),
+            ),
+          ),
+        );
+        await _until(() => bluetooth.writes.length > count);
+        bluetooth.receive('OVERR|1|cmd=ST|code=${entry.key}\r\n');
+        await failed;
+      }
+    },
+  );
+
   test(
     'cancels the previous queue when the socket automatically reconnects',
     () async {

@@ -1,6 +1,7 @@
 /* Private includes -----------------------------------------------------------*/
 //includes
 #include "user_TasksInit.h"
+#include "user_MessageSendTask.h"
 
 #include "ui.h"
 #include "ui_HomePage.h"
@@ -87,6 +88,12 @@ void StopEnterTask(void *argument)
 	{
 		if(osMessageQueueGet(Stop_MessageQueue,&Stopstr,NULL,0)==osOK)
 		{
+			/* SysTick is disabled in STOP mode, so a running stopwatch must stay awake. */
+			if(Stopwatch_IsRunning())
+			{
+				IdleTimerCount = 0;
+				continue;
+			}
 
 			/*************************** your operations before sleep***************************/
 			sleep:

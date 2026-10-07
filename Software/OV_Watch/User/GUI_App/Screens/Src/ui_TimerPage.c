@@ -1,6 +1,7 @@
 #include "../../ui.h"
 #include "../../ui_helpers.h"
 #include "../Inc/ui_TimerPage.h"
+#include "user_MessageSendTask.h"
 
 ///////////////////// Page Manager //////////////////
 Page_t Page_Timer = {ui_TimerPage_screen_init, ui_TimerPage_screen_deinit, &ui_TimerPage};
@@ -33,19 +34,23 @@ uint32_t ui_TimerPage_elapsed_ms=0;
 ///////////////////// Data Init ////////////////////
 static void ui_TimerPage_Data_init(void)
 {
-    ui_TimerPageFlag=0;
-    ui_TimerPage_min=0;
-    ui_TimerPage_sec=0;
-	ui_TimerPage_10ms=0;
-    ui_TimerPage_ms=0;
-    ui_TimerPage_elapsed_ms=0;
+    uint32_t elapsed = Stopwatch_ElapsedMs();
+    ui_TimerPageFlag = Stopwatch_IsRunning();
+    ui_TimerPage_elapsed_ms = elapsed;
+    ui_TimerPage_min = (elapsed / 60000U) % 60U;
+    ui_TimerPage_sec = (elapsed / 1000U) % 60U;
+	ui_TimerPage_10ms = (elapsed / 10U) % 100U;
+    ui_TimerPage_ms = elapsed % 10U;
 }
 
 /////////////////////// Timer //////////////////////
 static void LabelRefresh_timer(lv_timer_t * timer)
 {
-    uint32_t elapsed = ui_TimerPage_elapsed_ms;
-    uint8_t strbuf[2];
+    uint32_t elapsed = Stopwatch_ElapsedMs();
+    char strbuf[3];
+
+    (void)timer;
+    ui_TimerPage_elapsed_ms = elapsed;
 
     ui_TimerPage_min = (elapsed / 60000U) % 60U;
     ui_TimerPage_sec = (elapsed / 1000U) % 60U;
@@ -70,7 +75,8 @@ static void ui_event_TimerStartBtn(lv_event_t * e)
     if(event_code == LV_EVENT_VALUE_CHANGED &&  lv_obj_has_state(target, LV_STATE_CHECKED))
     {
         //checked
-        ui_TimerPageFlag = 1;
+        Stopwatch_Start();
+        ui_TimerPageFlag = Stopwatch_IsRunning();
         lv_label_set_text(ui_TimerStartLabel, LV_SYMBOL_PAUSE);
         lv_timer_resume(ui_TimerPageTimer);
 
@@ -78,8 +84,10 @@ static void ui_event_TimerStartBtn(lv_event_t * e)
     if(event_code == LV_EVENT_VALUE_CHANGED &&  !lv_obj_has_state(target, LV_STATE_CHECKED))
     {
         //released
-        ui_TimerPageFlag = 0;
+        Stopwatch_Pause();
+        ui_TimerPageFlag = Stopwatch_IsRunning();
         lv_label_set_text(ui_TimerStartLabel, LV_SYMBOL_PLAY);
+        LabelRefresh_timer(ui_TimerPageTimer);
         lv_timer_pause(ui_TimerPageTimer);
 
     }
@@ -92,6 +100,7 @@ static void ui_event_TimerReBtn(lv_event_t * e)
     if(event_code == LV_EVENT_CLICKED && !lv_obj_has_state(ui_TimerStartBtn, LV_STATE_CHECKED))
     {
         //clear
+        Stopwatch_Finish();
         lv_timer_pause(ui_TimerPageTimer);
         lv_label_set_text(ui_TimerMinLabel, "00");
         lv_label_set_text(ui_TimerSecLabel, "00");
@@ -187,10 +196,26 @@ void ui_TimerPage_screen_init(void)
 
     //timer
     ui_TimerPageTimer = lv_timer_create(LabelRefresh_timer, 10,  NULL);
-    lv_timer_pause(ui_TimerPageTimer);
+    LabelRefresh_timer(ui_TimerPageTimer);
+    if(Stopwatch_IsRunning())
+    {
+        lv_obj_add_state(ui_TimerStartBtn, LV_STATE_CHECKED);
+        lv_label_set_text(ui_TimerStartLabel, LV_SYMBOL_PAUSE);
+        lv_timer_resume(ui_TimerPageTimer);
+    }
+    else
+    {
+        lv_timer_pause(ui_TimerPageTimer);
+    }
 
 }
 
 //////////////////// SCREEN deinit ////////////////////
 void ui_TimerPage_screen_deinit(void)
-{}
+{
+    if(ui_TimerPageTimer != NULL)
+    {
+        lv_timer_del(ui_TimerPageTimer);
+        ui_TimerPageTimer = NULL;
+    }
+}

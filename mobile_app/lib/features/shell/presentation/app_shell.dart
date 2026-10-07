@@ -1,18 +1,26 @@
 import 'dart:async';
 
-import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../../../core/theme/app_theme.dart';
-import '../../history/domain/heart_rate_series.dart';
+import '../../history/presentation/health_history_panel.dart';
+import '../../settings/presentation/step_goal_dialog.dart';
+import '../../stopwatch/application/watch_stopwatch_controller.dart';
+import '../../stopwatch/presentation/stopwatch_page.dart';
 import '../../watch/application/watch_controller.dart';
 import '../../watch/domain/watch_snapshot.dart';
 import '../../watch/domain/watch_transport.dart';
 
 class AppShell extends StatefulWidget {
-  const AppShell({super.key, required this.controller});
+  const AppShell({
+    super.key,
+    required this.controller,
+    this.stopwatchController,
+  });
 
   final WatchController controller;
+  final WatchStopwatchController? stopwatchController;
 
   @override
   State<AppShell> createState() => _AppShellState();
@@ -30,6 +38,9 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     widget.controller.setAppActive(state == AppLifecycleState.resumed);
+    widget.stopwatchController?.setAppActive(
+      state == AppLifecycleState.resumed,
+    );
   }
 
   @override
@@ -40,7 +51,12 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
 
   void _selectPage(int value) {
     setState(() => _index = value);
-    if (value == 2 &&
+    widget.stopwatchController?.setVisible(value == 1);
+    if (value == 2) {
+      widget.controller.refreshHistory();
+      widget.stopwatchController?.syncHistory();
+    }
+    if (value == 3 &&
         widget.controller.devices.isEmpty &&
         !widget.controller.busy) {
       unawaited(widget.controller.refreshDevices());
@@ -50,13 +66,30 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   @override
   Widget build(BuildContext context) {
     return ListenableBuilder(
-      listenable: widget.controller,
+      listenable: Listenable.merge([
+        widget.controller,
+        if (widget.stopwatchController != null) widget.stopwatchController!,
+      ]),
       builder: (context, child) {
         final pages = [
-          _HealthPage(controller: widget.controller),
-          _HistoryPage(controller: widget.controller),
+          _HealthPage(
+            controller: widget.controller,
+            stopwatchController: widget.stopwatchController,
+            onViewStopwatch: () => _selectPage(1),
+          ),
+          if (widget.stopwatchController != null)
+            StopwatchPage(controller: widget.stopwatchController!)
+          else
+            const _EmptyState(icon: Icons.timer_outlined, text: '计时模块未初始化'),
+          _HistoryPage(
+            controller: widget.controller,
+            stopwatchController: widget.stopwatchController,
+          ),
           _DevicePage(controller: widget.controller),
-          _SettingsPage(controller: widget.controller),
+          _SettingsPage(
+            controller: widget.controller,
+            stopwatchController: widget.stopwatchController,
+          ),
         ];
         return Scaffold(
           body: SafeArea(
@@ -72,9 +105,14 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
                 label: '健康',
               ),
               NavigationDestination(
+                icon: Icon(Icons.timer_outlined),
+                selectedIcon: Icon(Icons.timer_rounded),
+                label: '计时',
+              ),
+              NavigationDestination(
                 icon: Icon(Icons.insights_outlined),
                 selectedIcon: Icon(Icons.insights_rounded),
-                label: '趋势',
+                label: '历史',
               ),
               NavigationDestination(
                 icon: Icon(Icons.watch_outlined),
@@ -84,7 +122,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
               NavigationDestination(
                 icon: Icon(Icons.tune_outlined),
                 selectedIcon: Icon(Icons.tune_rounded),
-                label: '设置',
+                label: '我的',
               ),
             ],
           ),
@@ -95,9 +133,15 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
 }
 
 class _HealthPage extends StatelessWidget {
-  const _HealthPage({required this.controller});
+  const _HealthPage({
+    required this.controller,
+    this.stopwatchController,
+    required this.onViewStopwatch,
+  });
 
   final WatchController controller;
+  final WatchStopwatchController? stopwatchController;
+  final VoidCallback onViewStopwatch;
 
   @override
   Widget build(BuildContext context) {
@@ -116,12 +160,24 @@ class _HealthPage extends StatelessWidget {
             sliver: SliverToBoxAdapter(
               child: _DailyHero(
                 snapshot: snapshot,
+                stepGoal: controller.stepGoal,
                 connected:
                     controller.connectionStatus ==
                     WatchConnectionStatus.connected,
               ),
             ),
           ),
+          if (snapshot != null &&
+              controller.connectionStatus != WatchConnectionStatus.connected)
+            SliverPadding(
+              padding: const EdgeInsets.fromLTRB(20, 16, 20, 0),
+              sliver: SliverToBoxAdapter(
+                child: Text(
+                  '离线查看 · 以下为 ${_dateTime(snapshot.capturedAt)} 保存的数据，非当前测量',
+                  style: const TextStyle(color: Color(0xFF7C879B)),
+                ),
+              ),
+            ),
           SliverPadding(
             padding: const EdgeInsets.fromLTRB(20, 16, 20, 32),
             sliver: SliverGrid(
@@ -136,13 +192,14 @@ class _HealthPage extends StatelessWidget {
                   unit: '次/分',
                   footnote: '仅在手表测量心率时更新',
                 ),
-                const _MetricCard(
-                  icon: Icons.water_drop_rounded,
-                  color: Color(0xFF8A63FF),
-                  label: '血氧',
-                  value: '--',
-                  unit: '%',
-                  footnote: '当前固件暂未实现',
+                _MetricCard(
+                  icon: Icons.timer_rounded,
+                  color: const Color(0xFF8A63FF),
+                  label: '计时记录',
+                  value: '${stopwatchController?.records.length ?? 0}',
+                  unit: '段',
+                  footnote: '点击查看已保存的计时',
+                  onTap: onViewStopwatch,
                 ),
                 _MetricCard(
                   icon: Icons.thermostat_rounded,
@@ -161,11 +218,20 @@ class _HealthPage extends StatelessWidget {
                   footnote: 'AHT21 环境传感器',
                 ),
               ]),
-              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                crossAxisCount: 2,
+              gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                crossAxisCount:
+                    MediaQuery.sizeOf(context).width < 350 ||
+                        MediaQuery.textScalerOf(context).scale(14) > 20
+                    ? 1
+                    : 2,
                 crossAxisSpacing: 12,
                 mainAxisSpacing: 12,
-                childAspectRatio: 0.92,
+                mainAxisExtent:
+                    220 *
+                    (MediaQuery.textScalerOf(context).scale(14) / 14).clamp(
+                      1.0,
+                      2.5,
+                    ),
               ),
             ),
           ),
@@ -246,15 +312,27 @@ class _Header extends StatelessWidget {
 }
 
 class _DailyHero extends StatelessWidget {
-  const _DailyHero({required this.snapshot, required this.connected});
+  const _DailyHero({
+    required this.snapshot,
+    required this.connected,
+    required this.stepGoal,
+  });
 
   final WatchSnapshot? snapshot;
   final bool connected;
+  final int stepGoal;
 
   @override
   Widget build(BuildContext context) {
-    final steps = snapshot?.steps ?? 0;
-    final progress = (steps / 8000).clamp(0.0, 1.0);
+    final now = DateTime.now();
+    final captured = snapshot?.capturedAt;
+    final today =
+        captured != null &&
+        captured.year == now.year &&
+        captured.month == now.month &&
+        captured.day == now.day;
+    final steps = today ? snapshot!.steps : 0;
+    final progress = (steps / stepGoal).clamp(0.0, 1.0);
     return Container(
       padding: const EdgeInsets.all(24),
       decoration: BoxDecoration(
@@ -275,18 +353,25 @@ class _DailyHero extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
+          Wrap(
+            spacing: 12,
+            runSpacing: 8,
+            alignment: WrapAlignment.spaceBetween,
             children: [
-              const Icon(Icons.directions_walk_rounded, color: Colors.white),
-              const SizedBox(width: 8),
-              const Text(
-                '今日步数',
-                style: TextStyle(
-                  color: Colors.white70,
-                  fontWeight: FontWeight.w600,
-                ),
+              const Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.directions_walk_rounded, color: Colors.white),
+                  SizedBox(width: 8),
+                  Text(
+                    '今日步数',
+                    style: TextStyle(
+                      color: Colors.white70,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
               ),
-              const Spacer(),
               Text(
                 snapshot == null
                     ? (connected ? '等待数据' : '连接手表后同步')
@@ -297,7 +382,7 @@ class _DailyHero extends StatelessWidget {
           ),
           const SizedBox(height: 22),
           Text(
-            '$steps',
+            today ? '$steps' : '--',
             style: const TextStyle(
               color: Colors.white,
               fontSize: 46,
@@ -306,7 +391,10 @@ class _DailyHero extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 8),
-          const Text('目标 8,000 步', style: TextStyle(color: Colors.white70)),
+          Text(
+            '目标 $stepGoal 步 · ${today ? (progress * 100).round() : 0}%',
+            style: const TextStyle(color: Colors.white70),
+          ),
           const SizedBox(height: 20),
           ClipRRect(
             borderRadius: BorderRadius.circular(999),
@@ -331,6 +419,7 @@ class _MetricCard extends StatelessWidget {
     required this.value,
     required this.unit,
     required this.footnote,
+    this.onTap,
   });
 
   final IconData icon;
@@ -339,64 +428,69 @@ class _MetricCard extends StatelessWidget {
   final String value;
   final String unit;
   final String footnote;
+  final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) {
     return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(18),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Container(
-              width: 40,
-              height: 40,
-              decoration: BoxDecoration(
-                color: color.withValues(alpha: 0.12),
-                borderRadius: BorderRadius.circular(13),
-              ),
-              child: Icon(icon, color: color),
-            ),
-            const Spacer(),
-            Text(
-              label,
-              style: const TextStyle(
-                color: Color(0xFF707B8F),
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-            const SizedBox(height: 3),
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.end,
-              children: [
-                Text(
-                  value,
-                  style: const TextStyle(
-                    fontSize: 30,
-                    fontWeight: FontWeight.w800,
-                    height: 1.1,
-                  ),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(24),
+        child: Padding(
+          padding: const EdgeInsets.all(18),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Container(
+                width: 40,
+                height: 40,
+                decoration: BoxDecoration(
+                  color: color.withValues(alpha: 0.12),
+                  borderRadius: BorderRadius.circular(13),
                 ),
-                const SizedBox(width: 4),
-                Padding(
-                  padding: const EdgeInsets.only(bottom: 3),
-                  child: Text(
-                    unit,
+                child: Icon(icon, color: color),
+              ),
+              const Spacer(),
+              Text(
+                label,
+                style: const TextStyle(
+                  color: Color(0xFF707B8F),
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(height: 3),
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  Text(
+                    value,
                     style: const TextStyle(
-                      color: Color(0xFF7C879B),
-                      fontSize: 12,
+                      fontSize: 30,
+                      fontWeight: FontWeight.w800,
+                      height: 1.1,
                     ),
                   ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 8),
-            Text(
-              footnote,
-              maxLines: 2,
-              style: const TextStyle(color: Color(0xFF9AA3B2), fontSize: 11),
-            ),
-          ],
+                  const SizedBox(width: 4),
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 3),
+                    child: Text(
+                      unit,
+                      style: const TextStyle(
+                        color: Color(0xFF7C879B),
+                        fontSize: 12,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              Text(
+                footnote,
+                maxLines: 2,
+                style: const TextStyle(color: Color(0xFF9AA3B2), fontSize: 11),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -404,157 +498,76 @@ class _MetricCard extends StatelessWidget {
 }
 
 class _HistoryPage extends StatelessWidget {
-  const _HistoryPage({required this.controller});
+  const _HistoryPage({required this.controller, this.stopwatchController});
 
   final WatchController controller;
+  final WatchStopwatchController? stopwatchController;
 
   @override
-  Widget build(BuildContext context) {
-    final end = DateTime.now();
-    final start = controller.historyRange.startAt(end);
-    final samples = controller.history
-        .where((item) => item.heartRate > 0)
-        .toList();
-    final points = aggregateHeartRate(samples: samples, start: start, end: end);
-    return ListView(
-      padding: const EdgeInsets.fromLTRB(20, 24, 20, 32),
+  Widget build(BuildContext context) => DefaultTabController(
+    length: 2,
+    child: Column(
       children: [
-        const Text(
-          '健康趋势',
-          style: TextStyle(fontSize: 28, fontWeight: FontWeight.w800),
+        const TabBar(
+          tabs: [
+            Tab(text: '健康数据'),
+            Tab(text: '计时记录'),
+          ],
         ),
-        const SizedBox(height: 4),
-        const Text(
-          '数据保存在本机，不需要云端账号',
-          style: TextStyle(color: Color(0xFF7C879B)),
-        ),
-        const SizedBox(height: 16),
-        SizedBox(
-          width: double.infinity,
-          child: SegmentedButton<HistoryRange>(
-            segments: [
-              for (final range in HistoryRange.values)
-                ButtonSegment(value: range, label: Text(range.label)),
-            ],
-            selected: {controller.historyRange},
-            showSelectedIcon: false,
-            onSelectionChanged: (selection) {
-              controller.selectHistoryRange(selection.first);
-            },
-          ),
-        ),
-        const SizedBox(height: 20),
-        Card(
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(20, 20, 20, 16),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text(
-                  '心率记录',
-                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  '${samples.length} 条有效记录 · ${points.length} 个时间段',
-                  style: const TextStyle(color: Color(0xFF8B95A7)),
-                ),
-                const SizedBox(height: 24),
-                SizedBox(
-                  height: 220,
-                  child: points.length < 2
-                      ? const _EmptyState(
-                          icon: Icons.insights_rounded,
-                          text: '连接手表并测量心率后显示曲线',
-                        )
-                      : LineChart(
-                          LineChartData(
-                            minY: 40,
-                            maxY: 180,
-                            minX: 0,
-                            maxX: 59,
-                            gridData: const FlGridData(
-                              show: true,
-                              drawVerticalLine: false,
-                            ),
-                            borderData: FlBorderData(show: false),
-                            titlesData: const FlTitlesData(
-                              topTitles: AxisTitles(
-                                sideTitles: SideTitles(showTitles: false),
-                              ),
-                              rightTitles: AxisTitles(
-                                sideTitles: SideTitles(showTitles: false),
-                              ),
-                              bottomTitles: AxisTitles(
-                                sideTitles: SideTitles(showTitles: false),
-                              ),
-                              leftTitles: AxisTitles(
-                                sideTitles: SideTitles(
-                                  showTitles: true,
-                                  reservedSize: 32,
-                                ),
-                              ),
-                            ),
-                            lineBarsData: [
-                              LineChartBarData(
-                                isCurved: true,
-                                color: AppTheme.heart,
-                                barWidth: 3,
-                                dotData: const FlDotData(show: false),
-                                belowBarData: BarAreaData(
-                                  show: true,
-                                  color: AppTheme.heart.withValues(alpha: 0.10),
-                                ),
-                                spots: [
-                                  for (final point in points)
-                                    FlSpot(
-                                      point.bucketIndex.toDouble(),
-                                      point.average,
-                                    ),
-                                ],
-                              ),
-                            ],
-                          ),
-                        ),
-                ),
-              ],
-            ),
-          ),
-        ),
-        const SizedBox(height: 14),
-        Card(
-          child: Padding(
-            padding: const EdgeInsets.all(20),
-            child: Row(
-              children: [
-                const Icon(Icons.storage_rounded, color: AppTheme.brand),
-                const SizedBox(width: 14),
-                Expanded(
-                  child: Text(
-                    '${controller.historyRange.label}已加载 '
-                    '${controller.history.length} 条采样记录',
+        Expanded(
+          child: TabBarView(
+            children: [
+              HealthHistoryPanel(
+                controller: controller,
+                stepGoal: controller.stepGoal,
+              ),
+              if (stopwatchController != null)
+                SingleChildScrollView(
+                  padding: const EdgeInsets.all(20),
+                  child: StopwatchHistoryPanel(
+                    controller: stopwatchController!,
                   ),
-                ),
-                IconButton(
-                  onPressed: controller.refreshHistory,
-                  icon: const Icon(Icons.refresh_rounded),
-                ),
-              ],
-            ),
+                )
+              else
+                const _EmptyState(icon: Icons.timer_outlined, text: '暂无计时记录'),
+            ],
           ),
         ),
       ],
-    );
-  }
+    ),
+  );
 }
 
-class _DevicePage extends StatelessWidget {
+class _DevicePage extends StatefulWidget {
   const _DevicePage({required this.controller});
 
   final WatchController controller;
 
   @override
+  State<_DevicePage> createState() => _DevicePageState();
+}
+
+class _DevicePageState extends State<_DevicePage> {
+  bool _showAll = false;
+  WatchController get controller => widget.controller;
+
+  @override
   Widget build(BuildContext context) {
+    final devices = controller.devices.where((device) {
+      final name = device.name.toLowerCase();
+      return _showAll ||
+          name.contains('kt6368') ||
+          name.contains('ov-watch') ||
+          device.address == controller.preferredDevice?.address ||
+          device.address == controller.connectedDevice?.address;
+    }).toList();
+    devices.sort((a, b) {
+      final address = controller.preferredDevice?.address;
+      if (a.address == b.address) return 0;
+      if (a.address == address) return -1;
+      if (b.address == address) return 1;
+      return a.name.compareTo(b.name);
+    });
     return ListView(
       padding: const EdgeInsets.fromLTRB(20, 24, 20, 32),
       children: [
@@ -577,6 +590,18 @@ class _DevicePage extends StatelessWidget {
           '请先在 Android 系统设置中配对 KT6368',
           style: TextStyle(color: Color(0xFF7C879B)),
         ),
+        SwitchListTile.adaptive(
+          contentPadding: EdgeInsets.zero,
+          title: const Text('显示其他已配对设备'),
+          subtitle: const Text('默认只展示手表，避免误连耳机等设备'),
+          value: _showAll,
+          onChanged: (value) => setState(() => _showAll = value),
+        ),
+        if (controller.preferredDevice != null)
+          Text(
+            '常用手表 · ${controller.preferredDevice!.name}\n${controller.preferredDevice!.address}',
+            style: const TextStyle(color: Color(0xFF7C879B)),
+          ),
         const SizedBox(height: 20),
         if (controller.errorMessage != null)
           _ErrorBanner(
@@ -591,17 +616,17 @@ class _DevicePage extends StatelessWidget {
             borderRadius: BorderRadius.all(Radius.circular(999)),
           ),
         const SizedBox(height: 12),
-        if (controller.devices.isEmpty && !controller.busy)
+        if (devices.isEmpty && !controller.busy)
           const Card(
             child: SizedBox(
               height: 180,
               child: _EmptyState(
                 icon: Icons.bluetooth_searching_rounded,
-                text: '未发现已配对设备',
+                text: '未发现匹配的已配对手表\n可开启“显示其他已配对设备”',
               ),
             ),
           ),
-        for (final device in controller.devices) ...[
+        for (final device in devices) ...[
           _DeviceCard(device: device, controller: controller),
           const SizedBox(height: 12),
         ],
@@ -686,9 +711,10 @@ class _DeviceCard extends StatelessWidget {
 }
 
 class _SettingsPage extends StatelessWidget {
-  const _SettingsPage({required this.controller});
+  const _SettingsPage({required this.controller, this.stopwatchController});
 
   final WatchController controller;
+  final WatchStopwatchController? stopwatchController;
 
   @override
   Widget build(BuildContext context) {
@@ -698,10 +724,26 @@ class _SettingsPage extends StatelessWidget {
       padding: const EdgeInsets.fromLTRB(20, 24, 20, 32),
       children: [
         const Text(
-          '设备设置',
+          '我的与设置',
           style: TextStyle(fontSize: 28, fontWeight: FontWeight.w800),
         ),
         const SizedBox(height: 20),
+        Card(
+          child: ListTile(
+            leading: const Icon(Icons.flag_outlined),
+            title: const Text('每日步数目标'),
+            subtitle: Text('${controller.stepGoal} 步 · 根据自己的日常安排设置'),
+            trailing: const Icon(Icons.chevron_right_rounded),
+            onTap: () => showDialog<void>(
+              context: context,
+              builder: (_) => StepGoalDialog(
+                initialGoal: controller.stepGoal,
+                onSave: controller.updateStepGoal,
+              ),
+            ),
+          ),
+        ),
+        const SizedBox(height: 16),
         Card(
           child: Column(
             children: [
@@ -754,6 +796,27 @@ class _SettingsPage extends StatelessWidget {
                     : null,
               ),
               const Divider(height: 1, indent: 16, endIndent: 16),
+              if (stopwatchController != null) ...[
+                ListTile(
+                  leading: const Icon(Icons.fact_check_outlined),
+                  title: const Text('手表校时开关'),
+                  subtitle: Text(
+                    !connected
+                        ? '连接手表后可查询；旧固件可能不支持'
+                        : stopwatchController!.capabilities == null
+                        ? '当前固件未返回开关状态，请在手表上检查“同步APP”'
+                        : '上次查询：${stopwatchController!.capabilities!.clockSyncEnabled ? "已开启" : "未开启，请先在手表上开启"}',
+                  ),
+                  trailing: IconButton(
+                    tooltip: '重新查询手表功能与校时开关',
+                    icon: const Icon(Icons.refresh_rounded),
+                    onPressed: connected && !stopwatchController!.busy
+                        ? stopwatchController!.refreshCapabilities
+                        : null,
+                  ),
+                ),
+                const Divider(height: 1, indent: 16, endIndent: 16),
+              ],
               const ListTile(
                 leading: Icon(Icons.bluetooth_connected_rounded),
                 title: Text('自动重连'),
@@ -764,45 +827,7 @@ class _SettingsPage extends StatelessWidget {
           ),
         ),
         const SizedBox(height: 16),
-        const Text(
-          '开发者日志',
-          style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
-        ),
-        const SizedBox(height: 10),
-        Container(
-          height: 270,
-          padding: const EdgeInsets.all(14),
-          decoration: BoxDecoration(
-            color: const Color(0xFF151922),
-            borderRadius: BorderRadius.circular(20),
-          ),
-          child: controller.logs.isEmpty
-              ? const Center(
-                  child: Text(
-                    '连接后显示 TX / RX 记录',
-                    style: TextStyle(color: Colors.white54),
-                  ),
-                )
-              : ListView.builder(
-                  reverse: true,
-                  itemCount: controller.logs.length,
-                  itemBuilder: (context, index) {
-                    final line =
-                        controller.logs[controller.logs.length - 1 - index];
-                    return Padding(
-                      padding: const EdgeInsets.only(bottom: 5),
-                      child: Text(
-                        line,
-                        style: const TextStyle(
-                          color: Color(0xFFB9F6CA),
-                          fontFamily: 'monospace',
-                          fontSize: 12,
-                        ),
-                      ),
-                    );
-                  },
-                ),
-        ),
+        _DiagnosticsCard(controller: controller),
         const SizedBox(height: 16),
         const Card(
           child: ListTile(
@@ -813,6 +838,92 @@ class _SettingsPage extends StatelessWidget {
           ),
         ),
       ],
+    );
+  }
+}
+
+class _DiagnosticsCard extends StatelessWidget {
+  const _DiagnosticsCard({required this.controller});
+  final WatchController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    final snapshot = controller.latest;
+    final device = controller.connectedDevice ?? controller.preferredDevice;
+    return Card(
+      child: ExpansionTile(
+        leading: const Icon(Icons.troubleshoot_rounded),
+        title: const Text('连接诊断与日志'),
+        subtitle: Text(
+          snapshot == null
+              ? '尚未收到测量数据'
+              : '最近采样 ${_dateTime(snapshot.capturedAt)}',
+        ),
+        childrenPadding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+        children: [
+          Align(
+            alignment: Alignment.centerLeft,
+            child: Text(
+              [
+                if (device != null) '设备：${device.name} · ${device.address}',
+                '连接采样间隔：${controller.pollInterval.inSeconds} 秒',
+                '历史保存间隔：${controller.historyPersistInterval.inSeconds} 秒',
+                if (snapshot != null)
+                  '回包中的手表时间：${_dateTime(snapshot.watchTime)}',
+                if (snapshot != null)
+                  '接收时手机时间：${_dateTime(snapshot.capturedAt)}',
+                '断开期间不补采健康数据；离线缓存不是实时值。',
+                '血氧测量尚未实现，固件默认值 99 不作为真实数据展示。',
+                '若校时无变化，先检查手表“日期时间 → 同步APP”。',
+              ].join('\n'),
+            ),
+          ),
+          const SizedBox(height: 12),
+          if (controller.errorMessage != null)
+            _ErrorBanner(message: controller.errorMessage!),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: TextButton.icon(
+              icon: const Icon(Icons.copy_rounded),
+              label: const Text('复制诊断日志'),
+              onPressed: controller.logs.isEmpty
+                  ? null
+                  : () async {
+                      await Clipboard.setData(
+                        ClipboardData(text: controller.logs.join('\n')),
+                      );
+                      if (context.mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(content: Text('日志已复制；分享前请检查设备地址等信息')),
+                        );
+                      }
+                    },
+            ),
+          ),
+          Container(
+            constraints: const BoxConstraints(maxHeight: 220),
+            width: double.infinity,
+            padding: const EdgeInsets.all(14),
+            decoration: BoxDecoration(
+              color: const Color(0xFF151922),
+              borderRadius: BorderRadius.circular(16),
+            ),
+            child: SingleChildScrollView(
+              reverse: true,
+              child: SelectableText(
+                controller.logs.isEmpty
+                    ? '连接后显示 TX / RX 记录'
+                    : controller.logs.join('\n'),
+                style: const TextStyle(
+                  color: Color(0xFFB9F6CA),
+                  fontFamily: 'monospace',
+                  fontSize: 12,
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -883,3 +994,7 @@ String _clock(DateTime time) {
   final minute = time.minute.toString().padLeft(2, '0');
   return '更新于 $hour:$minute';
 }
+
+String _dateTime(DateTime time) =>
+    '${time.year}-${time.month.toString().padLeft(2, '0')}-${time.day.toString().padLeft(2, '0')} '
+    '${time.hour.toString().padLeft(2, '0')}:${time.minute.toString().padLeft(2, '0')}:${time.second.toString().padLeft(2, '0')}';

@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 
 import '../../history/data/health_history_repository.dart';
 import '../domain/watch_snapshot.dart';
+import '../domain/watch_preferences.dart';
 import '../domain/watch_transport.dart';
 
 enum WatchConnectionStatus {
@@ -36,13 +37,16 @@ class WatchController extends ChangeNotifier {
   WatchController({
     required WatchTransport transport,
     required HealthHistoryRepository historyRepository,
+    WatchPreferencesRepository? preferencesRepository,
     this.pollInterval = const Duration(seconds: 2),
     this.historyPersistInterval = const Duration(minutes: 1),
   }) : _transport = transport,
-       _historyRepository = historyRepository;
+       _historyRepository = historyRepository,
+       _preferencesRepository = preferencesRepository;
 
   final WatchTransport _transport;
   final HealthHistoryRepository _historyRepository;
+  final WatchPreferencesRepository? _preferencesRepository;
   final Duration pollInterval;
   final Duration historyPersistInterval;
 
@@ -69,6 +73,8 @@ class WatchController extends ChangeNotifier {
   bool busy = false;
   ClockSyncStatus clockSyncStatus = ClockSyncStatus.idle;
   String? clockSyncMessage;
+  int stepGoal = 8000;
+  WatchDevice? preferredDevice;
 
   Future<void> initialize() async {
     _snapshotSubscription = _transport.snapshots.listen(
@@ -78,9 +84,20 @@ class WatchController extends ChangeNotifier {
     _logSubscription = _transport.logs.listen(_onLog);
     _linkStateSubscription = _transport.linkStates.listen(_onLinkState);
     try {
+      final preferences = await _preferencesRepository?.loadPreferences();
+      if (preferences != null) {
+        stepGoal = preferences.stepGoal;
+        preferredDevice = preferences.preferredDevice;
+      }
+    } catch (error) {
+      _setError(error);
+    }
+    try {
       await _historyRepository.pruneBefore(
         DateTime.now().subtract(const Duration(days: 90)),
       );
+      final cached = await _historyRepository.recent(limit: 1);
+      if (cached.isNotEmpty && latest == null) latest = cached.last;
     } catch (error) {
       _setError(error);
     }
@@ -95,6 +112,7 @@ class WatchController extends ChangeNotifier {
 
   Future<void> connect(WatchDevice device) async {
     _resetClockSync();
+    latest = null;
     connectionStatus = WatchConnectionStatus.connecting;
     connectedDevice = device;
     errorMessage = null;
@@ -117,6 +135,22 @@ class WatchController extends ChangeNotifier {
     connectionStatus = WatchConnectionStatus.disconnected;
     connectedDevice = null;
     notifyListeners();
+  }
+
+  Future<bool> updateStepGoal(int value) async {
+    if (value < 1000 || value > 50000) return false;
+    try {
+      await _preferencesRepository?.saveStepGoal(value);
+      if (_disposed) return false;
+      stepGoal = value;
+      errorMessage = null;
+      errorCanOpenSettings = false;
+      notifyListeners();
+      return true;
+    } catch (error) {
+      if (!_disposed) _setError(error);
+      return false;
+    }
   }
 
   Future<void> requestNow() async {
@@ -250,6 +284,11 @@ class WatchController extends ChangeNotifier {
         connectionStatus = WatchConnectionStatus.connecting;
       case WatchLinkState.connected:
         connectionStatus = WatchConnectionStatus.connected;
+        final device = connectedDevice;
+        if (device != null) {
+          preferredDevice = device;
+          unawaited(_rememberDevice(device));
+        }
         errorMessage = null;
         errorCanOpenSettings = false;
         _startPolling();
@@ -264,6 +303,14 @@ class WatchController extends ChangeNotifier {
         return;
     }
     notifyListeners();
+  }
+
+  Future<void> _rememberDevice(WatchDevice device) async {
+    try {
+      await _preferencesRepository?.savePreferredDevice(device);
+    } catch (error) {
+      if (!_disposed) _setError(error);
+    }
   }
 
   void _startPolling() {
