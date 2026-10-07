@@ -714,12 +714,44 @@ class _SettingsPage extends StatelessWidget {
               ),
               const Divider(height: 1, indent: 16, endIndent: 16),
               ListTile(
-                enabled: connected,
+                enabled:
+                    connected &&
+                    controller.clockSyncStatus != ClockSyncStatus.syncing,
                 leading: const Icon(Icons.schedule_rounded),
-                title: const Text('同步手机时间'),
-                subtitle: const Text('发送到手表 RTC'),
-                trailing: const Icon(Icons.chevron_right_rounded),
-                onTap: controller.syncClock,
+                title: Text(
+                  controller.clockSyncStatus == ClockSyncStatus.syncing
+                      ? '正在同步时间…'
+                      : '同步手机时间',
+                ),
+                subtitle: Semantics(
+                  liveRegion: true,
+                  child: Text(
+                    controller.clockSyncMessage ?? '请先在手表“日期时间”中开启“同步APP”',
+                  ),
+                ),
+                trailing: switch (controller.clockSyncStatus) {
+                  ClockSyncStatus.syncing => const SizedBox.square(
+                    dimension: 24,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      semanticsLabel: '等待手表确认校时',
+                    ),
+                  ),
+                  ClockSyncStatus.succeeded => const Icon(
+                    Icons.check_circle_outline_rounded,
+                  ),
+                  ClockSyncStatus.failed => const Icon(
+                    Icons.error_outline_rounded,
+                  ),
+                  ClockSyncStatus.idle => const Icon(
+                    Icons.chevron_right_rounded,
+                  ),
+                },
+                onTap:
+                    connected &&
+                        controller.clockSyncStatus != ClockSyncStatus.syncing
+                    ? controller.syncClock
+                    : null,
               ),
               const Divider(height: 1, indent: 16, endIndent: 16),
               const ListTile(

@@ -61,6 +61,157 @@ void main() {
 
     controller.dispose();
   });
+
+  test(
+    'clock sync ignores repeat taps and waits for acknowledgement',
+    () async {
+      final transport = _FakeWatchTransport();
+      transport.clockSyncCompletion = Completer<void>();
+      final controller = WatchController(
+        transport: transport,
+        historyRepository: _FakeHistoryRepository(),
+        pollInterval: const Duration(milliseconds: 20),
+      );
+      await controller.initialize();
+      await controller.connect(transport.devices.single);
+      transport.emitLinkState(WatchLinkState.connected);
+      await _flushEvents();
+
+      final pendingSync = controller.syncClock();
+      await controller.syncClock();
+      await controller.requestNow();
+      final pausedCount = transport.snapshotRequests;
+      await Future<void>.delayed(const Duration(milliseconds: 70));
+      expect(transport.clockSyncRequests, 1);
+      expect(transport.snapshotRequests, pausedCount);
+      expect(controller.clockSyncStatus, ClockSyncStatus.syncing);
+      expect(controller.clockSyncMessage, contains('等待手表确认'));
+
+      transport.clockSyncCompletion!.complete();
+      await pendingSync;
+      expect(controller.clockSyncStatus, ClockSyncStatus.succeeded);
+      expect(controller.clockSyncMessage, contains('手表已确认'));
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      expect(transport.snapshotRequests, greaterThan(pausedCount));
+      controller.dispose();
+    },
+  );
+
+  test('clock sync failure is visible and allows retry', () async {
+    final transport = _FakeWatchTransport();
+    transport.clockSyncCompletion = Completer<void>();
+    final controller = WatchController(
+      transport: transport,
+      historyRepository: _FakeHistoryRepository(),
+    );
+    await controller.initialize();
+    transport.emitLinkState(WatchLinkState.connected);
+    await _flushEvents();
+
+    final pendingSync = controller.syncClock();
+    transport.clockSyncCompletion!.completeError(
+      const WatchTransportException('请先开启手表“同步APP”'),
+    );
+    await pendingSync;
+    expect(controller.clockSyncStatus, ClockSyncStatus.failed);
+    expect(controller.clockSyncMessage, contains('同步APP'));
+
+    transport.clockSyncCompletion = null;
+    await controller.syncClock();
+    expect(transport.clockSyncRequests, 2);
+    expect(controller.clockSyncStatus, ClockSyncStatus.succeeded);
+    controller.dispose();
+  });
+
+  test('clock sync does not send commands while disconnected', () async {
+    final transport = _FakeWatchTransport();
+    final controller = WatchController(
+      transport: transport,
+      historyRepository: _FakeHistoryRepository(),
+    );
+    await controller.initialize();
+    await controller.syncClock();
+    expect(transport.clockSyncRequests, 0);
+    expect(controller.clockSyncStatus, ClockSyncStatus.failed);
+    expect(controller.clockSyncMessage, '请先连接手表');
+    controller.dispose();
+  });
+
+  test('manual refresh does not pile up behind an ongoing sample', () async {
+    final transport = _FakeWatchTransport();
+    transport.snapshotCompletion = Completer<void>();
+    final controller = WatchController(
+      transport: transport,
+      historyRepository: _FakeHistoryRepository(),
+      pollInterval: const Duration(milliseconds: 20),
+    );
+    await controller.initialize();
+    transport.emitLinkState(WatchLinkState.connected);
+    await _flushEvents();
+    await controller.requestNow();
+    await controller.requestNow();
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+    expect(transport.snapshotRequests, 1);
+    transport.snapshotCompletion!.complete();
+    await _flushEvents();
+    controller.dispose();
+  });
+
+  test('disposing during clock sync does not restart polling', () async {
+    final transport = _FakeWatchTransport();
+    transport.clockSyncCompletion = Completer<void>();
+    final controller = WatchController(
+      transport: transport,
+      historyRepository: _FakeHistoryRepository(),
+      pollInterval: const Duration(milliseconds: 20),
+    );
+    await controller.initialize();
+    transport.emitLinkState(WatchLinkState.connected);
+    await _flushEvents();
+    final pendingSync = controller.syncClock();
+    controller.dispose();
+    final requestCount = transport.snapshotRequests;
+    transport.clockSyncCompletion!.completeError(
+      const WatchTransportException('连接已断开'),
+    );
+    await pendingSync;
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+    expect(transport.snapshotRequests, requestCount);
+  });
+
+  test(
+    'switching watches clears clock status and ignores old completion',
+    () async {
+      final transport = _FakeWatchTransport();
+      final controller = WatchController(
+        transport: transport,
+        historyRepository: _FakeHistoryRepository(),
+      );
+      await controller.initialize();
+      transport.emitLinkState(WatchLinkState.connected);
+      await _flushEvents();
+      await controller.syncClock();
+      expect(controller.clockSyncStatus, ClockSyncStatus.succeeded);
+
+      await controller.connect(transport.devices.single);
+      expect(controller.clockSyncStatus, ClockSyncStatus.idle);
+      expect(controller.clockSyncMessage, isNull);
+      transport.emitLinkState(WatchLinkState.connected);
+      await _flushEvents();
+      transport.clockSyncCompletion = Completer<void>();
+      final oldSync = controller.syncClock();
+      await controller.connect(
+        const WatchDevice(name: 'Second watch', address: '11:22:33:44:55:66'),
+      );
+      transport.emitLinkState(WatchLinkState.connected);
+      await _flushEvents();
+      transport.clockSyncCompletion!.complete();
+      await oldSync;
+      expect(controller.clockSyncStatus, ClockSyncStatus.idle);
+      expect(controller.clockSyncMessage, isNull);
+      controller.dispose();
+    },
+  );
 }
 
 Future<void> _flushEvents() => Future<void>.delayed(Duration.zero);
@@ -75,6 +226,9 @@ class _FakeWatchTransport implements WatchTransport {
   ];
 
   int snapshotRequests = 0;
+  Completer<void>? snapshotCompletion;
+  int clockSyncRequests = 0;
+  Completer<void>? clockSyncCompletion;
   bool connected = false;
 
   @override
@@ -118,10 +272,14 @@ class _FakeWatchTransport implements WatchTransport {
   @override
   Future<void> requestSnapshot() async {
     snapshotRequests++;
+    await snapshotCompletion?.future;
   }
 
   @override
-  Future<void> syncClock(DateTime time) async {}
+  Future<void> syncClock(DateTime time) async {
+    clockSyncRequests++;
+    await clockSyncCompletion?.future;
+  }
 }
 
 class _FakeHistoryRepository implements HealthHistoryRepository {

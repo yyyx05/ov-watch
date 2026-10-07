@@ -14,6 +14,8 @@ enum WatchConnectionStatus {
   failed,
 }
 
+enum ClockSyncStatus { idle, syncing, succeeded, failed }
+
 enum HistoryRange {
   day('今日', Duration(days: 1)),
   week('7 天', Duration(days: 7)),
@@ -51,6 +53,8 @@ class WatchController extends ChangeNotifier {
   DateTime? _lastPersistedAt;
   bool _pollInFlight = false;
   bool _appActive = true;
+  bool _disposed = false;
+  int _clockSyncGeneration = 0;
 
   WatchConnectionStatus connectionStatus = WatchConnectionStatus.disconnected;
   List<WatchDevice> devices = const [];
@@ -63,6 +67,8 @@ class WatchController extends ChangeNotifier {
   bool errorCanOpenSettings = false;
   bool autoRefresh = true;
   bool busy = false;
+  ClockSyncStatus clockSyncStatus = ClockSyncStatus.idle;
+  String? clockSyncMessage;
 
   Future<void> initialize() async {
     _snapshotSubscription = _transport.snapshots.listen(
@@ -88,6 +94,7 @@ class WatchController extends ChangeNotifier {
   }
 
   Future<void> connect(WatchDevice device) async {
+    _resetClockSync();
     connectionStatus = WatchConnectionStatus.connecting;
     connectedDevice = device;
     errorMessage = null;
@@ -104,6 +111,7 @@ class WatchController extends ChangeNotifier {
   }
 
   Future<void> disconnect() async {
+    _resetClockSync();
     _pollTimer?.cancel();
     await _transport.disconnect();
     connectionStatus = WatchConnectionStatus.disconnected;
@@ -116,11 +124,49 @@ class WatchController extends ChangeNotifier {
       _setError(const WatchTransportException('手表尚未连接'));
       return;
     }
-    await _guard(_transport.requestSnapshot);
+    if (_pollInFlight || clockSyncStatus == ClockSyncStatus.syncing) return;
+    _pollInFlight = true;
+    try {
+      await _guard(_transport.requestSnapshot);
+    } finally {
+      _pollInFlight = false;
+    }
   }
 
   Future<void> syncClock() async {
-    await _guard(() => _transport.syncClock(DateTime.now()));
+    if (clockSyncStatus == ClockSyncStatus.syncing) return;
+    if (connectionStatus != WatchConnectionStatus.connected) {
+      clockSyncStatus = ClockSyncStatus.failed;
+      clockSyncMessage = '请先连接手表';
+      notifyListeners();
+      return;
+    }
+    clockSyncStatus = ClockSyncStatus.syncing;
+    clockSyncMessage = '正在等待手表确认…';
+    final generation = _clockSyncGeneration;
+    _pollTimer?.cancel();
+    notifyListeners();
+    try {
+      await _transport.syncClock(DateTime.now());
+      if (_disposed || generation != _clockSyncGeneration) return;
+      clockSyncStatus = ClockSyncStatus.succeeded;
+      clockSyncMessage = '同步成功，手表已确认';
+    } catch (error) {
+      if (_disposed || generation != _clockSyncGeneration) return;
+      clockSyncStatus = ClockSyncStatus.failed;
+      clockSyncMessage = error.toString();
+    } finally {
+      if (!_disposed && generation == _clockSyncGeneration) {
+        _startPolling();
+        notifyListeners();
+      }
+    }
+  }
+
+  void _resetClockSync() {
+    _clockSyncGeneration++;
+    clockSyncStatus = ClockSyncStatus.idle;
+    clockSyncMessage = null;
   }
 
   void setAutoRefresh(bool value) {
@@ -194,6 +240,7 @@ class WatchController extends ChangeNotifier {
   }
 
   void _onLinkState(WatchLinkState state) {
+    if (state != WatchLinkState.connected) _resetClockSync();
     switch (state) {
       case WatchLinkState.disconnected:
         _pollTimer?.cancel();
@@ -221,8 +268,10 @@ class WatchController extends ChangeNotifier {
 
   void _startPolling() {
     _pollTimer?.cancel();
-    if (!autoRefresh ||
+    if (_disposed ||
+        !autoRefresh ||
         !_appActive ||
+        clockSyncStatus == ClockSyncStatus.syncing ||
         connectionStatus != WatchConnectionStatus.connected) {
       return;
     }
@@ -232,6 +281,7 @@ class WatchController extends ChangeNotifier {
   Future<void> _requestSnapshotQuietly() async {
     if (_pollInFlight ||
         !_appActive ||
+        clockSyncStatus == ClockSyncStatus.syncing ||
         connectionStatus != WatchConnectionStatus.connected) {
       return;
     }
@@ -272,6 +322,7 @@ class WatchController extends ChangeNotifier {
 
   @override
   void dispose() {
+    _disposed = true;
     _pollTimer?.cancel();
     _snapshotSubscription?.cancel();
     _logSubscription?.cancel();

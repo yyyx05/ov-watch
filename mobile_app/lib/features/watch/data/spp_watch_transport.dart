@@ -7,8 +7,17 @@ import '../domain/watch_transport.dart';
 import 'legacy_ov_parser.dart';
 
 class SppWatchTransport implements WatchTransport {
+  SppWatchTransport({
+    this.responseTimeout = const Duration(seconds: 2),
+    this.protocolProbeTimeout = const Duration(milliseconds: 800),
+    this.commandRecoveryInterval = const Duration(milliseconds: 80),
+  });
+
+  final Duration responseTimeout;
+  final Duration protocolProbeTimeout;
+  final Duration commandRecoveryInterval;
   final FlutterClassicBluetooth _bluetooth = FlutterClassicBluetooth();
-  final LegacyOvParser _parser = LegacyOvParser();
+  LegacyOvParser _parser = LegacyOvParser();
   final StreamController<WatchSnapshot> _snapshotController =
       StreamController<WatchSnapshot>.broadcast();
   final StreamController<String> _logController =
@@ -19,8 +28,11 @@ class SppWatchTransport implements WatchTransport {
   BtcReconnectingConnection? _connection;
   StreamSubscription<String>? _lineSubscription;
   StreamSubscription<BtcReconnectState>? _stateSubscription;
-  Timer? _protocolProbeTimer;
   bool? _supportsVersionedData;
+  Future<void> _transactionTail = Future<void>.value();
+  int _session = 0;
+  Completer<void>? _activeResponse;
+  bool Function(String, WatchSnapshot?)? _responseMatches;
 
   @override
   Stream<WatchSnapshot> get snapshots => _snapshotController.stream;
@@ -71,10 +83,14 @@ class SppWatchTransport implements WatchTransport {
         final snapshot = _parser.addLine(line);
         if (isVersionedFrame && snapshot != null) {
           _supportsVersionedData = true;
-          _protocolProbeTimer?.cancel();
-          _protocolProbeTimer = null;
         }
         if (snapshot != null) _snapshotController.add(snapshot);
+        final response = _activeResponse;
+        if (response != null &&
+            !response.isCompleted &&
+            (_responseMatches?.call(line, snapshot) ?? false)) {
+          response.complete();
+        }
       },
       onError: (Object error, StackTrace stackTrace) {
         _log('ERROR $error');
@@ -86,6 +102,7 @@ class SppWatchTransport implements WatchTransport {
       _onReconnectState,
       onError: (Object error, StackTrace stackTrace) {
         _log('ERROR $error');
+        _invalidateSession();
         _linkStateController.add(WatchLinkState.failed);
       },
     );
@@ -93,27 +110,39 @@ class SppWatchTransport implements WatchTransport {
   }
 
   @override
-  Future<void> requestSnapshot() async {
-    if (_supportsVersionedData == true) {
-      await _writeLine('OV+DATA');
-      return;
-    }
-    if (_supportsVersionedData == false) {
-      await _writeLine('OV+SEND');
-      return;
-    }
+  Future<void> requestSnapshot() {
+    return _enqueue((session) async {
+      _parser = LegacyOvParser();
+      if (_supportsVersionedData == null) {
+        try {
+          await _sendAndWait(
+            session,
+            'OV+DATA',
+            (line, snapshot) =>
+                line.trimLeft().startsWith('OVD|') && snapshot != null,
+            timeout: protocolProbeTimeout,
+          );
+          return;
+        } on TimeoutException {
+          _ensureSession(session);
+          _supportsVersionedData = false;
+          _log('INFO OV+DATA unsupported; falling back to OV+SEND');
+        }
+      }
 
-    await _writeLine('OV+DATA');
-    _protocolProbeTimer?.cancel();
-    _protocolProbeTimer = Timer(const Duration(milliseconds: 800), () {
-      if (_supportsVersionedData != null || !isConnected) return;
-      _supportsVersionedData = false;
-      _log('INFO OV+DATA unsupported; falling back to OV+SEND');
-      unawaited(
-        _writeLine(
-          'OV+SEND',
-        ).catchError((Object error) => _log('ERROR $error')),
-      );
+      final versioned = _supportsVersionedData == true;
+      try {
+        await _sendAndWait(
+          session,
+          versioned ? 'OV+DATA' : 'OV+SEND',
+          (line, snapshot) =>
+              snapshot != null &&
+              line.trimLeft().startsWith('OVD|') == versioned,
+        );
+      } on TimeoutException {
+        _ensureSession(session);
+        throw const WatchTransportException('读取手表数据超时，请确认手表蓝牙连接正常');
+      }
     });
   }
 
@@ -123,16 +152,79 @@ class SppWatchTransport implements WatchTransport {
         'OV+ST=${_four(time.year)}${_two(time.month)}'
         '${_two(time.day)}${_two(time.hour)}${_two(time.minute)}'
         '${_two(time.second)}';
-    return _writeLine(command);
+    return _enqueue((session) async {
+      try {
+        await _sendAndWait(
+          session,
+          command,
+          (line, snapshot) => line.trim() == 'TIMESETOK',
+        );
+      } on TimeoutException {
+        _ensureSession(session);
+        throw const WatchTransportException(
+          '校时未收到手表确认，请先在手表“日期时间”中打开“同步APP”，再重试',
+        );
+      }
+    });
   }
 
-  Future<void> _writeLine(String command) async {
-    final connection = _connection;
-    if (connection == null || !connection.isConnected) {
-      throw StateError('手表尚未连接');
-    }
+  Future<void> _enqueue(Future<void> Function(int session) action) {
+    final session = _session;
+    final operation = _transactionTail.then((_) async {
+      _ensureSession(session);
+      await action(session);
+    });
+    // A failed transaction must not poison the remaining queue.
+    _transactionTail = operation.then<void>((_) {}, onError: (Object _) {});
+    return operation;
+  }
+
+  Future<void> _sendAndWait(
+    int session,
+    String command,
+    bool Function(String, WatchSnapshot?) matches, {
+    Duration? timeout,
+  }) async {
+    _ensureSession(session);
+    final response = Completer<void>();
+    _activeResponse = response;
+    _responseMatches = matches;
     _log('TX $command');
-    await connection.sendLine(command);
+    try {
+      // Register the waiter before sending; firmware matches exact bytes, without
+      // CR/LF. Keep the transaction occupied until the complete reply arrives.
+      await Future.wait<void>([
+        _connection!.sendString(command),
+        response.future,
+      ], eagerError: true).timeout(timeout ?? responseTimeout);
+    } finally {
+      if (identical(_activeResponse, response)) {
+        _activeResponse = null;
+        _responseMatches = null;
+      }
+      // The firmware clears its shared DMA buffer after printing the response.
+      await Future<void>.delayed(commandRecoveryInterval);
+    }
+    _ensureSession(session);
+  }
+
+  void _ensureSession(int session) {
+    if (session != _session || !isConnected) {
+      throw const WatchTransportException('蓝牙连接已中断，请重新连接后重试');
+    }
+  }
+
+  void _invalidateSession() {
+    _session++;
+    _supportsVersionedData = null;
+    _parser = LegacyOvParser();
+    final response = _activeResponse;
+    _activeResponse = null;
+    _responseMatches = null;
+    if (response != null && !response.isCompleted) {
+      response.completeError(const WatchTransportException('蓝牙连接已中断，请重新连接后重试'));
+    }
+    _transactionTail = Future<void>.value();
   }
 
   String _two(int value) => value.toString().padLeft(2, '0');
@@ -142,9 +234,7 @@ class SppWatchTransport implements WatchTransport {
 
   @override
   Future<void> disconnect() async {
-    _protocolProbeTimer?.cancel();
-    _protocolProbeTimer = null;
-    _supportsVersionedData = null;
+    _invalidateSession();
     await _lineSubscription?.cancel();
     _lineSubscription = null;
     await _stateSubscription?.cancel();
@@ -165,7 +255,9 @@ class SppWatchTransport implements WatchTransport {
       throw const WatchTransportException('请先打开手机蓝牙');
     }
 
-    const permissions = {BtcPermission.connect};
+    // The Android connector cancels discovery before opening its RFCOMM socket.
+    // Android 12+ requires scan permission for that call, even for paired devices.
+    const permissions = {BtcPermission.connect, BtcPermission.scan};
     var status = await _bluetooth.checkPermissions(permissions: permissions);
     if (status == BtcPermissionStatus.denied) {
       status = await _bluetooth.requestPermissions(permissions: permissions);
@@ -188,20 +280,44 @@ class SppWatchTransport implements WatchTransport {
     _log('STATE ${state.name}');
     switch (state) {
       case BtcReconnectState.connecting:
+        _invalidateSession();
         _linkStateController.add(WatchLinkState.connecting);
       case BtcReconnectState.connected:
-        _linkStateController.add(WatchLinkState.connected);
-        unawaited(
-          _writeLine('OV').catchError((Object error) => _log('ERROR $error')),
-        );
+        _invalidateSession();
+        unawaited(_handshake());
       case BtcReconnectState.reconnecting:
+        _invalidateSession();
         _linkStateController.add(WatchLinkState.reconnecting);
       case BtcReconnectState.closed:
+        _invalidateSession();
         _linkStateController.add(WatchLinkState.disconnected);
       case BtcReconnectState.failed:
+        _invalidateSession();
         final error = _connection?.lastError;
         if (error != null) _log('ERROR $error');
         _linkStateController.add(WatchLinkState.failed);
+    }
+  }
+
+  Future<void> _handshake() async {
+    final session = _session;
+    try {
+      await _enqueue(
+        (session) => _sendAndWait(
+          session,
+          'OV',
+          (line, snapshot) => line.trim() == 'OK',
+        ),
+      );
+      // The controller starts polling on connected; wait for the acknowledgement
+      // so its first request cannot merge with OV in the firmware DMA buffer.
+      if (session == _session && isConnected) {
+        _linkStateController.add(WatchLinkState.connected);
+      }
+    } catch (error) {
+      if (session != _session || !isConnected) return;
+      _log('ERROR handshake: $error');
+      _linkStateController.add(WatchLinkState.failed);
     }
   }
 
